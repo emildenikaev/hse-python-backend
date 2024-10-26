@@ -1,10 +1,6 @@
 name: Run python tests
 
 on:
-  add:
-    branches: ["feature/homework_2"]
-  commit:
-    branches: ["feature/homework_2"]
   push:
     branches: ["main"]
   pull_request:
