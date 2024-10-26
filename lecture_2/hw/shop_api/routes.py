@@ -1,161 +1,166 @@
-from fastapi import APIRouter, HTTPException, Query
-from typing import List, Optional
+from fastapi import APIRouter, HTTPException, Response, status, Query
+from pydantic import BaseModel, NonNegativeInt, PositiveInt, NonNegativeFloat
+from typing import List
 from .models import Item, Cart, CartItem
-from .database import items_db, carts_db, create_item, create_cart, update_cart_price
+from .database import items_db, carts_db, next_item_id, next_cart_id
+
+def item_exists(item_id):
+    return item_id in items_db and not items_db[item_id].deleted
+
+def cart_exists(cart_id):
+    return cart_id in carts_db
 
 router = APIRouter()
 
-# Роуты для управления товарами
-@router.post("/item", response_model=Item, status_code=201)
-def post_item(item: Item):
-    if item.price <= 0:
-        raise HTTPException(status_code=422, detail="Price must be positive")
-    
-    # Always create a new Item ID to ensure uniqueness
-    item.id = create_item(item.name, item.price)
-
-    return items_db[item.id]
-
-
-@router.get("/item/{item_id}", response_model=Item)
-def get_item(item_id: str):
-    item = items_db.get(item_id)
-    if not item or item.deleted:
-        raise HTTPException(status_code=404, detail="Item not found")
+@router.post('/item', status_code=status.HTTP_201_CREATED)
+def create_item(item: Item, response: Response):
+    global next_item_id
+    item.id = next_item_id
+    items_db[next_item_id] = item
+    next_item_id += 1
+    response.headers["Location"] = f'/item/{item.id}'
     return item
 
-@router.delete("/item/{item_id}")
-def delete_item(item_id: str):
-    item = items_db.get(item_id)
-    if item:
-        item.deleted = True
-    return {"detail": "Item deleted"}
-
-@router.patch("/item/{item_id}")
-def patch_item(item_id: str, item: Item):
-    existing_item = items_db.get(item_id)
-    if not existing_item or existing_item.deleted:
+@router.get("/item/{id}")
+def get_item(id: int):
+    if not item_exists(id):
         raise HTTPException(status_code=404, detail="Item not found")
-
-    if "deleted" in item.dict():
-        raise HTTPException(status_code=422, detail="Cannot modify 'deleted' status")
-
-    existing_data = existing_item.dict(exclude_unset=True)
-    update_data = item.dict(exclude_unset=True)
-
-    if field_difference := set(update_data.keys()) - set(existing_data.keys()):
-        raise HTTPException(status_code=422, detail=f"Unexpected fields: {field_difference}")
-
-    # Update fields
-    if 'name' in update_data:
-        existing_item.name = update_data['name']
-    if 'price' in update_data:
-        if update_data['price'] <= 0:
-            raise HTTPException(status_code=422, detail="Price must be positive")
-        existing_item.price = update_data['price']
-
-    return existing_item
+    return items_db[id]
 
 
-# Новый метод для получения списка товаров
-@router.get("/item", response_model=List[Item])
-def get_item_list(
-    offset: Optional[int] = Query(default=0, ge=0),
-    limit: Optional[int] = Query(default=10, gt=0),
-    min_price: Optional[float] = Query(default=None, ge=0),
-    max_price: Optional[float] = Query(default=None),
-    show_deleted: Optional[bool] = Query(default=False)
+@router.get("/item")
+def list_items(
+    offset: NonNegativeInt = 0,
+    limit: PositiveInt = 10,
+    min_price: NonNegativeFloat = None,
+    max_price: NonNegativeFloat = None,
+    show_deleted: bool = False
 ):
-    filtered_items = list(items_db.values())
-
-    if not show_deleted:
-        filtered_items = [item for item in filtered_items if not item.deleted]
-
+    items = [item for item in items_db.values() if show_deleted or not item.deleted]
     if min_price is not None:
-        filtered_items = [item for item in filtered_items if item.price >= min_price]
+        items = [item for item in items if item.price >= min_price]
     if max_price is not None:
-        filtered_items = [item for item in filtered_items if item.price <= max_price]
+        items = [item for item in items if item.price <= max_price]
+    return items[offset:offset + limit]
 
-    return filtered_items[offset:offset + limit]
 
-# Новый метод для замены товара
-@router.put("/item/{item_id}", response_model=Item)
-def put_item(item_id: str, item: Item):
-    existing_item = items_db.get(item_id)
-    if not existing_item or existing_item.deleted:
+@router.put("/item/{id}")
+def update_item(id: int, item: Item):
+    if not item_exists(id):
         raise HTTPException(status_code=404, detail="Item not found")
-
-    # Validate the entire item is being replaced without extra fields
-    if set(item.dict().keys()) - {"name", "price", "id", "deleted"}:
-        raise HTTPException(status_code=422, detail="Unexpected fields in the request body")
-
-    # Replace all fields
-    existing_item.name = item.name
-    if item.price <= 0:
-        raise HTTPException(status_code=422, detail="Price must be positive")
-    existing_item.price = item.price
-
-    return existing_item
+    item.id = id
+    items_db[id] = item
+    return item
 
 
-# Роуты для управления корзинами
-@router.post("/cart", response_model=dict, status_code=201)
-def post_cart():
-    cart_id = create_cart()
-    return {"id": cart_id}
+@router.patch("/item/{id}")
+def patch_item(id: int, item: dict):
+    item_to_patch = items_db.get(id)
+    if not item_to_patch or item_to_patch.deleted:
+        raise HTTPException(status_code=304,
+                            detail="Item not modified")
 
-@router.get("/cart/{cart_id}", response_model=Cart)
-def get_cart(cart_id: str):
-    cart = carts_db.get(cart_id)
-    if not cart:
+    for key, value in item.items():
+        if key == "deleted" and value:
+            raise HTTPException(status_code=422,
+                                detail="Cannot delete item")
+        if not hasattr(item_to_patch, key):
+            raise HTTPException(status_code=422,
+                                detail=f"Attribute '{key}' not found")
+        setattr(item_to_patch, key, value)
+
+    return item_to_patch
+
+@router.delete("/item/{id}")
+def delete_item(id: int):
+    if id not in items_db:
+        raise HTTPException(status_code=404,
+                            detail="Item not found")
+    item = items_db[id]
+    item.deleted = True
+    return item
+
+@router.post("/cart", status_code=status.HTTP_201_CREATED)
+def create_cart(response: Response):
+    global next_cart_id
+    cart = Cart(id=next_cart_id)
+    carts_db[next_cart_id] = cart
+    next_cart_id += 1
+    response.headers["Location"] = f'/cart/{cart.id}'
+    return {"id": cart.id}
+
+@router.get("/cart/{id}")
+def get_cart(id: int):
+    if not cart_exists(id):
         raise HTTPException(status_code=404, detail="Cart not found")
-    update_cart_price(cart)  # Обновление цены корзины
-    return cart
+    return carts_db[id]
 
-@router.post("/cart/{cart_id}/add/{item_id}", status_code=200)
-def add_item_to_cart(cart_id: str, item_id: str):
-    cart = carts_db.get(cart_id)
-    item = items_db.get(item_id)
 
-    if not cart:
+@router.get("/cart")
+def list_carts(
+    offset: NonNegativeInt = 0,
+    limit: PositiveInt = 10,
+    min_price: NonNegativeFloat = None,
+    max_price: NonNegativeFloat = None,
+    min_quantity: NonNegativeInt = None,
+    max_quantity: NonNegativeInt = None
+):
+    carts = list(carts_db.values())
+    if min_price is not None:
+        carts = [cart for cart in carts if cart.price >= min_price]
+    if max_price is not None:
+        carts = [cart for cart in carts if cart.price <= max_price]
+    if min_quantity is not None:
+        carts = [cart for cart in carts if sum(item.quantity for item in cart.items) >= min_quantity]
+    if max_quantity is not None:
+        carts = [cart for cart in carts if sum(item.quantity for item in cart.items) <= max_quantity]
+    return carts[offset:offset + limit]
+
+
+@router.post('/cart/{cart_id}/add/{item_id}')
+def add_item_to_cart(cart_id: int, item_id: int):
+    if not cart_exists(cart_id):
         raise HTTPException(status_code=404, detail="Cart not found")
-    if not item or item.deleted:
-        raise HTTPException(status_code=404, detail="Item not found")
+    if not item_exists(item_id):
+        raise HTTPException(status_code=404, detail="Item not found or deleted")
 
-    item_in_cart = next((item for item in cart.items if item.id == item_id), None)
+    cart = carts_db[cart_id]
+    item = items_db[item_id]
 
-    if item_in_cart:
-        item_in_cart.quantity += 1
+    for cart_item in cart.items:
+        if cart_item.id == item.id:
+            cart_item.quantity += 1
+            break
     else:
-        cart.items.append(CartItem(id=item_id, quantity=1))
+        cart.items.append(CartItem(id=item.id, name=item.name, quantity=1))
 
-    update_cart_price(cart)
-
-    return {"detail": "Item added to cart"}
-
+    cart.price += item.price
+    return {"status": "Item added"}
 
 
-@router.get("/cart", response_model=List[Cart])
-def get_cart_list(
-    offset: Optional[int] = Query(default=0, ge=0),
-    limit: Optional[int] = Query(default=10, ge=0),
-    min_price: Optional[float] = Query(default=None, ge=0),
-    max_price: Optional[float] = Query(default=None),
-    min_quantity: Optional[int] = Query(default=None, ge=0),
-    max_quantity: Optional[int] = Query(default=None, ge=0),
-):
-    filtered_carts = list(carts_db.values())
-    
-    if min_price is not None:
-        filtered_carts = [cart for cart in filtered_carts if cart.price >= min_price]
-    if max_price is not None:
-        filtered_carts = [cart for cart in filtered_carts if cart.price <= max_price]
-    
-    total_quantity = sum(len(cart.items) for cart in filtered_carts)
-    
-    if min_quantity is not None and total_quantity < min_quantity:
-        raise HTTPException(status_code=422, detail="Total quantity is less than min_quantity")
-    if max_quantity is not None and total_quantity > max_quantity:
-        raise HTTPException(status_code=422, detail="Total quantity is greater than max_quantity")
+@router.delete('/cart/{cart_id}/remove/{item_id}')
+def remove_item_from_cart(cart_id: int, item_id: int):
+    if not cart_exists(cart_id):
+        raise HTTPException(status_code=404, detail="Cart not found")
+    if not item_exists(item_id):
+        raise HTTPException(status_code=404, detail="Item not found or deleted")
 
-    return filtered_carts[offset:offset + limit]
+    cart = carts_db[cart_id]
+    for cart_item in cart.items:
+        if cart_item.id == item_id:
+            if cart_item.quantity > 1:
+                cart_item.quantity -= 1
+            else:
+                cart.items.remove(cart_item)
+            cart.price -= items_db[item_id].price
+            return {"status": "Item removed"}
+
+    raise HTTPException(status_code=404, detail="Item not found in cart")
+
+
+@router.delete('/cart/{cart_id}')
+def delete_cart(cart_id: int):
+    if not cart_exists(cart_id):
+        raise HTTPException(status_code=404, detail="Cart not found")
+    del carts_db[cart_id]
+    return {"status": "Cart deleted"}
