@@ -1,8 +1,8 @@
 from fastapi import APIRouter, HTTPException, Response, status, Query
 from pydantic import BaseModel, NonNegativeInt, PositiveInt, NonNegativeFloat
 from typing import List
-from .models import Item, Cart, CartItem
-from .database import items_db, carts_db, next_item_id, next_cart_id
+from models import Item, Cart, CartItem
+from database import items_db, carts_db, next_item_id, next_cart_id
 
 def item_exists(item_id):
     return item_id in items_db and not items_db[item_id].deleted

@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  local:
+    build:
+      context: ../../  
+      dockerfile: lecture_3/hw/Dockerfile        
+    ports:
+      - "8080:8080"
+    environment:
+      - PYTHONPATH=/app/src  
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - 3000:3000
+
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./settings/prometheus/:/etc/prometheus/
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    ports:
+      - 9090:9090
+    restart: always
